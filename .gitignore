@@ -9,6 +9,8 @@ validation
 *.md
 *.pdf
 
+!README.md
+
 # large blend files
 *.blend*
 
