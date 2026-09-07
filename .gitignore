@@ -1,0 +1,14 @@
+# tools
+*__pycache__
+Microsoft
+
+# trial artifcats
+validation
+
+# documents
+*.md
+*.pdf
+
+# large blend files
+*.blend*
+
