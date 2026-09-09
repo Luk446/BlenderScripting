@@ -14,3 +14,7 @@ validation
 # large blend files
 *.blend*
 *.png
+
+# Remote render jobs, logs, snapshots, and downloaded review data
+outputs/
+logs/

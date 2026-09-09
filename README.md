@@ -1,5 +1,154 @@
 # Mooring chain dataset
 
+## Remote GPU rendering from this VM
+
+The VM checkout is `/home/Luke/BlenderScripting`. The GPU machine is
+`luke_admin@iris`, with the remote project at `/home/luke_admin/BlenderScripting`.
+Blender **5.2.1 LTS** is installed at
+`/home/luke_admin/apps/blender-5.2.1-linux-x64/blender`; its bundled Python has
+Pillow **12.3.0** for padded annotation exports. The scene was saved with Blender
+5.2, and its textures are packed. No display or X forwarding is needed.
+
+From a terminal in this VM:
+
+```bash
+cd /home/Luke/BlenderScripting
+bash remote_render.sh check
+
+# After changing local scripts or the scene, sync before starting a new job.
+# Wait for active render jobs to finish before replacing the scene.
+bash remote_render.sh sync
+
+# Example production job: 1,000 images in batches of 100.
+bash remote_render.sh start chains_001 1000 --batch-size 100 --seed 10000
+bash remote_render.sh status chains_001
+
+# Download the job into this checkout's outputs/chains_001 directory.
+bash remote_render.sh fetch chains_001
+```
+
+`start` runs in a detached **tmux** session on iris, so rendering continues when
+SSH disconnects or the VM shuts down. A reboot of iris stops the job; resume it
+afterward. Choose a new job name for each dataset and a nonoverlapping seed range
+for different batches. `--seed 10000` with 1,000 images uses seeds 10000–10999.
+The helper supports `RENDER_HOST`, `RENDER_ROOT` and `RENDER_BLENDER` environment
+variables if the host or installation paths change.
+
+Defaults are **640 × 640**, the **saved render engine**, and its saved sample
+count. This scene uses **Eevee at 64 samples**. Eevee uses the graphics driver's
+default GPU. To render with Cycles on the RTX 5090 using OptiX instead:
+
+```bash
+bash remote_render.sh start cycles_001 1000 \
+  --engine cycles --samples 128 --batch-size 100 --seed 20000
+```
+
+Switching engines changes appearance and timing. Set `--width 1280 --height 1280`
+for larger images. `--samples` overrides render samples for the chosen engine;
+otherwise they remain as authored. `--backend CUDA` and `--device N` select a
+Cycles backend/device; they do not select Eevee's graphics device. The run fails
+if the requested Cycles GPU is unavailable. Start one render job at a time on
+this single-GPU machine.
+
+The initial ten-image Eevee pilot at 640 × 640 completed in approximately 14
+seconds, including two Blender startups, placement, annotations and export.
+This is a small setup benchmark, not a guaranteed rate for larger jobs or Cycles.
+Test runs are under `outputs/smoke_20260909` and `outputs/pilot_setup_20260909`.
+An additional 128-sample Cycles/OptiX test completed in approximately 3 seconds
+for one image, with NVIDIA's process monitor confirming Blender on the RTX 5090.
+It is under `outputs/cycles_smoke_20260909`. The ten-image pilot was fetched to
+the VM and has overlays inside each completed run's `overlays/` directory.
+
+### Progress, interruption and resume
+
+The main log is `logs/JOB.log` on iris. Detailed Blender logs, including errors,
+are inside `outputs/JOB/batch_*/render_*.log`. `progress.json` records completed
+images; the job's top-level `complete.json` appears only after all batches finish.
+To inspect a running terminal:
+
+```bash
+ssh -t luke_admin@iris 'tmux attach -t blend-chains_001'
+```
+
+Detach with **Ctrl+B**, then **D**. **Ctrl+C** stops the job. To resume a stopped
+or failed job, repeat its original arguments using `resume`:
+
+```bash
+bash remote_render.sh resume chains_001 1000 --batch-size 100 --seed 10000
+```
+
+Completed batches are checked and skipped. The interrupted batch restarts into
+a new `run_...` folder using the same seeds; its earlier incomplete attempt is
+retained for diagnosis. Use the `completed_runs` list in `progress.json` or
+`complete.json` to identify successful runs. Do not combine failed attempts with
+their replacements. Smaller batches lose less work after interruption; larger
+batches reduce Blender startup overhead.
+
+Each job snapshots the generator/helper/entry-point scripts and records scene
+and Blender executable SHA-256 hashes. Resume rejects changed settings or a
+changed scene/executable. Script edits affect new jobs; resumed jobs use their
+saved scripts. Keep the scene and any unpacked external assets unchanged while
+a job runs. A lock prevents two workers from running the same job. The runner
+checks for at least 20 GiB free before each batch and stops if below that level;
+this is a reserve check, not a prediction of the next batch's disk usage.
+
+### Outputs and review
+
+Render to iris's local disk, then fetch results to the VM or copy them to the
+NAS. The command-line entry point overrides the generator's Windows/NAS output
+path without editing its desktop defaults. Native Linux mounts are required to
+write to a NAS directly; Windows UNC paths are not Linux mount paths.
+
+Every successful batch contains the existing `run_...` layout with image/label
+pairs, metadata, settings, annotation reports and an additional
+`render_runtime.json`. All generated annotations remain pending human review.
+For example, after fetching a job:
+
+```bash
+python3 view_yolo_obb.py outputs/chains_001/batch_00000000/run_...
+```
+
+Use the approval workflow below after inspecting the overlays. Retain each run
+folder's identity: filenames restart at `chain_00000.png` in each batch, so
+flattening batches into one folder would overwrite images. Padded image/label
+pairs must remain together. Outputs and logs are ignored by Git.
+
+### Installation and checks
+
+The installed Linux archive was downloaded from the
+[official Blender 5.2 release directory](https://download.blender.org/release/Blender5.2/)
+and verified against `blender-5.2.1.sha256`. The archive and checksum are retained
+in `/home/luke_admin/apps/downloads`. No system Blender or driver was replaced.
+For a replacement installation, extract the verified archive under `apps`, then
+install Pillow into that Blender's Python:
+
+```bash
+ssh -o BatchMode=yes luke_admin@iris \
+  '/home/luke_admin/apps/blender-5.2.1-linux-x64/5.2/python/bin/python3.13 -m pip install Pillow==12.3.0'
+```
+
+`render_headless.py --check-only` verifies render-asset paths, Pillow and GPU
+discovery; an actual test render is still needed to check rendering itself.
+The low-level Blender command is:
+
+```bash
+ssh -o BatchMode=yes luke_admin@iris \
+  '/home/luke_admin/apps/blender-5.2.1-linux-x64/blender \
+    --background --factory-startup --disable-autoexec \
+    /home/luke_admin/BlenderScripting/ChainLinkScene.blend \
+    --python-exit-code 1 \
+    --python /home/luke_admin/BlenderScripting/render_headless.py -- --check-only'
+```
+
+`--disable-autoexec` prevents saved embedded scripts from running; the explicit
+headless script controls generation. See Blender's
+[command-line documentation](https://docs.blender.org/manual/en/5.2/advanced/command_line/arguments.html).
+Local regression checks: `python3 -m unittest test_yolo_obb test_render_batches -v`.
+The existing `validate_yolo_obb.py` and `validate_dataset.py` checks also pass in
+Blender 5.2.1 on iris, covering geometry, occlusion, repeatability and restoration.
+
+## Desktop Blender launcher
+
 Copy the entire contents of `blender_pylauncher.py` into Blender's Text Editor,
 replacing the old embedded generator. Press **Run Script**. The launcher reads
 `C:\Users\Luke\Documents\Blends\generate_dataset.py` from disk on every run.
