@@ -38,16 +38,54 @@ restored after completion or a Python error. The generator does not save the
 blend. Avoid editing the scene while it runs. Blender may be busy during renders.
 The generator also produces **YOLO OBB labels**, with class `0: link`.
 
+## Network storage
+
+For the current NAS workflow, set the generator output to a UNC path before
+rendering:
+
+```python
+OUTPUT_FOLDER = r"\\frontier-nas-1\home\BlenderSimDatasetNAS"
+```
+
+Keep review overlays separate from the approved dataset:
+
+```powershell
+python view_yolo_obb.py "\\frontier-nas-1\home\BlenderSimDatasetNAS\run_..." `
+  --output "\\frontier-nas-1\home\BlenderSimDatasetNAS\review_overlays\run_..."
+```
+
+Approve into a separate NAS destination, using `--exclude` once per rejected
+image:
+
+```powershell
+python approve_yolo_obb.py "\\frontier-nas-1\home\BlenderSimDatasetNAS\run_..." `
+  --output "\\frontier-nas-1\home\Approved_BlenderSimDatasetNAS\run_..." `
+  --exclude chain_00003.png
+```
+
+The source run is not modified, and approval refuses to overwrite an existing
+destination. Keep the `.blend`, scripts and Blender installation local. Verify
+the share is writable before starting a large render.
+
 `generate_dataset.original.py` preserves the original external script.
 `validate_dataset.py` checks seeded repeatability, visibility metadata and scene
 restoration, including a deliberate failure. Test outputs are in `validation/`.
 
 ## YOLO OBB annotations and review
 
+**Detection requirement:** recognise individual links when approximately **70% of
+their projected appearance is visible**, including cropped and occluded links,
+provided identity and long-axis direction remain clear. A complete link is not
+required. This is a 2-D visibility target, not a measurement of visible 3-D volume.
+See [Partial-link annotation policy](docs/PARTIAL_LINK_POLICY.md) for definitions,
+padding effects, review rules and the evaluation requirement.
+
 The unchanged Blender launcher loads the latest generator and `yolo_obb.py` on
 every run. Keep these files together. Blender needs no additional Python packages
-for labels. The external viewer needs OpenCV and NumPy in the Python environment
-used to run it; `yoloinstall.py` is not needed by the generator.
+for geometry calculations. Exporting boundary boxes with padded image canvases
+uses Pillow, already installed in the current Blender Python environment. The
+external viewer needs OpenCV and NumPy in its Python environment;
+`yoloinstall.py` is not needed by the generator.
 
 Annotation controls have their own comment block near the top of the generator.
 The initial setting `REVIEW_ALL_ANNOTATIONS = True` keeps all pilot images out of
@@ -81,12 +119,24 @@ foreshortened axis shorter than the transverse box side is flagged. Final corner
 are normalised by width and height separately; angle metadata is clockwise from
 image-right, modulo 180 degrees.
 
-For cropped links, the centre must be inside the image. The projected hull is
-clipped to the image and fitted at the same axis angle. A rotated rectangle around
-that polygon can still cross the image boundary. Such cases are **unresolved**:
-the full candidate rectangle stays in JSON, no malformed/clamped box is written,
-and the entire image is quarantined for review. Resolve the boundary annotation
-or leave the image out of training; do not approve a pair with missing labels.
+For cropped links, the centre must be inside the original image. The projected
+hull is clipped to that image and fitted at the same axis angle. A rotated
+rectangle around that polygon can still cross the image boundary.
+`EXPORT_BOUNDARY_BOXES = True` now includes these visible-link boxes, adding only
+enough neutral grey padding to contain their corners. All image coordinates and
+labels shift together; rectangles retain their shape, angle and original size.
+The exported canvas can be larger than the configured render size. Original
+pixels are preserved, and unpadded renders are kept in `originals/`. JSON records
+source/output dimensions and padding. Set the option to False to restore the
+previous behaviour of withholding out-of-frame boxes as red review candidates.
+
+Padding is an export accommodation, not a simulation of underwater occlusion.
+It preserves the original pixels but adds visible grey borders. Resizing a larger
+padded canvas to a fixed training size makes the link smaller; artificial borders
+may also become a learned cue. The effect on accuracy has not been measured.
+Include real partial-link examples and natural occlusion within the image, and
+evaluate on real source images without this custom boundary padding. Do not treat
+approved padded boxes as proof that the detector recognises 70%-visible links.
 
 Visibility is estimated using deterministic surface rays, comparing the link's
 own surface against scene occluders. No visible samples means no candidate label
@@ -97,19 +147,46 @@ mask area fractions or proof of recognisability**. Materials, transparency and
 fog require visual judgement. Numerical thresholds are provisional pilot controls.
 Turning off pilot review does not bypass these other flags.
 
+The current `visible_fraction` is conditional on sampled surface points already
+inside the source frame and not self-hidden. It does not measure the fraction of
+the full link lost to cropping. Neither that value nor
+`LABEL_MIN_VISIBLE_FRACTION = 0.35` enforces the approximately 70% visibility
+requirement. This remains a manual annotation/evaluation target until full-link
+reference masks and visible masks are measured. Do not change the threshold to
+0.70 and interpret it as a calibrated partial-link percentage.
+
 Generate review overlays from normal Python:
 
 ```powershell
 python view_yolo_obb.py "C:\path\to\run_..."
 ```
 
-Green rectangles are candidate labels present in the TXT; red rectangles are
-unresolved candidates present only in JSON. A yellow header marks review images.
-Review each PNG with its JSON reasons. Correct incomplete labels before moving
-approved image/label pairs together from `review/` into the main `images/train/`
-and `labels/train/` directories and adding `./images/train/<name>.png` to
-`train_ready.txt`. Record that approval/correction in its annotation JSON. Images
-that cannot be labelled consistently should remain outside training.
+Green rectangles are labels present in the TXT; red rectangles are candidates
+present only in JSON. A yellow header marks review images. Boundary candidates
+with visible surface samples are now exported green by default. Fog/identity
+checks still flag whole images independently of that geometric acceptance.
+
+After visually approving all displayed boxes in an existing batch, use:
+
+```powershell
+python approve_yolo_obb.py "C:\path\to\run_..." --exclude chain_00001.png
+```
+
+Repeat `--exclude` for any other bad images; omit it if all images are approved.
+This is an explicit human approval: even a displayed candidate missed by the
+visibility sampler is included. Objects with no candidate rectangle or with
+centres outside the original image are not invented or added. It writes a separate
+dataset under `approved_datasets/<run name>/` in the current working directory;
+`--output` can select another new destination. Existing destinations are refused.
+The source batch is not modified. The derived dataset contains complete image/label
+pairs, updated annotation reports, `train_ready.txt`, and `approval.json` recording
+the source batch and excluded images. Any necessary padding is also applied to
+old red boundary boxes so they become valid normalised YOLO rectangles.
+
+Run the viewer on that approved dataset to regenerate all-green overlays. Use its
+image/label pairs together; padded labels must not be paired with original,
+unpadded images. The exported dataset remains training-only, with real capture
+runs used for validation/test. Leave unidentifiable images out of the approval.
 
 Old exports used bottom-origin Y values and clamped corners; regenerate them with
 the corrected generator. The new viewer expects top-origin YOLO coordinates and

@@ -3,6 +3,7 @@ import math
 from pathlib import Path
 import tempfile
 import unittest
+import copy
 
 import yolo_obb as obb
 
@@ -87,6 +88,52 @@ class LabelGeometryTests(unittest.TestCase):
             obb.write_annotation(folder, 'dry.png', {'status': 'needs_review', 'label_lines': []}, False)
             self.assertTrue((folder/'annotations'/'dry.json').exists())
             self.assertFalse(list(folder.rglob('*.txt')))
+
+    def test_approved_boundary_rectangles_get_padding_not_clamping(self):
+        points = [(-15, 35), (25, 75), (45, 55), (5, 15)]
+        record = obb.fit_link_box(points, (15, 45), (1, 1), 100, 100)
+        record.update(name='link_test', visible_samples=20, label_index=None)
+        report = dict(image_width=100, image_height=100, links=[record], reasons=['pilot_manual_review'],
+                      status='needs_review', label_lines=[])
+        original = copy.deepcopy(report)
+        approved = obb.include_review_boxes(report, approve_all=True)
+        self.assertEqual(report, original)
+        self.assertEqual(approved['status'], 'ready')
+        self.assertGreater(approved['padding']['left'], 0)
+        self.assertEqual(approved['links'][0]['label_index'], 0)
+        self.assert_rectangle(approved['links'][0]['box'])
+        for x, y in approved['links'][0]['box']:
+            self.assertTrue(0 <= x <= approved['image_width'])
+            self.assertTrue(0 <= y <= approved['image_height'])
+
+    def test_automatic_boundary_acceptance_does_not_approve_hidden_candidates(self):
+        record = dict(name='hidden', box=None, candidate_box=rectangle(20, 20, 10, 5, 0),
+                      excluded=None, visible_samples=0, label_index=None,
+                      reasons=['no_visible_samples_check_occlusion'])
+        report = dict(image_width=100, image_height=100, links=[record], reasons=['hidden'],
+                      status='needs_review', label_lines=[])
+        result = obb.include_review_boxes(report)
+        self.assertEqual(result['label_lines'], [])
+        self.assertEqual(result['status'], 'needs_review')
+        # Explicit manual approval can accept a displayed candidate missed by the sampler.
+        approved = obb.include_review_boxes(report, approve_all=True)
+        self.assertEqual(len(approved['label_lines']), 1)
+
+    def test_padding_keeps_original_pixels_exactly(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as temporary:
+            source, output = Path(temporary)/'source.png', Path(temporary)/'padded.png'
+            image = Image.new('RGBA', (20, 10), (37, 86, 149, 255))
+            image.putpixel((4, 5), (201, 111, 67, 128))
+            image.save(source)
+            before = source.read_bytes()
+            report = dict(source_image_width=20, source_image_height=10, image_width=27, image_height=19,
+                          padding=dict(left=3, right=4, top=5, bottom=4))
+            obb.save_padded_image(source, output, report)
+            with Image.open(output) as padded:
+                self.assertEqual(padded.size, (27, 19))
+                self.assertEqual(padded.crop((3, 5, 23, 15)).tobytes(), image.tobytes())
+            self.assertEqual(source.read_bytes(), before)
 
 
 if __name__ == '__main__':

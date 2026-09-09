@@ -6,6 +6,8 @@ by the generator. Run settings live in generate_dataset.py.
 """
 import json
 import math
+import copy
+import shutil
 from pathlib import Path
 
 
@@ -108,6 +110,121 @@ def label_line(box, width, height, class_id=0):
     if not all(math.isfinite(v) and 0 <= v <= 1 for v in values):
         raise ValueError('Invalid normalised OBB coordinates')
     return ' '.join([str(class_id), *(f'{v:.8f}' for v in values)])
+
+
+# -----------------------------------------------------------------------------
+# APPROVED BOUNDARY BOXES - preserve rectangles by padding the image canvas
+# -----------------------------------------------------------------------------
+def include_review_boxes(report, approve_all=False):
+    """Return a derived report with previously withheld rectangles included.
+
+    Automatic use accepts only boundary candidates with visible surface samples.
+    approve_all=True is for an explicit human approval of all displayed boxes in
+    an existing image. It also accepts manually verified occlusion candidates.
+    The original report and geometry remain unchanged. No corner is clamped.
+    """
+    result = copy.deepcopy(report)
+    selected = []
+    for record in result['links']:
+        box = record.get('box')
+        candidate = record.get('candidate_box')
+        boundary = ('boundary_box_requires_manual_resolution' in record.get('reasons', [])
+                    and record.get('visible_samples', 0) > 0)
+        if box is None and candidate and not record.get('excluded') and (approve_all or boundary):
+            box = candidate
+            record['box'] = box
+            record['accepted_review_box'] = True
+            if not approve_all and boundary:
+                record['resolved_reasons'] = ['boundary_box_requires_manual_resolution']
+                record['reasons'] = [reason for reason in record.get('reasons', [])
+                                     if reason != 'boundary_box_requires_manual_resolution']
+        if box is not None and not record.get('excluded'):
+            if len(box) != 4 or not all(math.isfinite(v) for point in box for v in point):
+                raise ValueError(f"Invalid box for {record['name']}")
+            edges = [(box[(i+1)%4][0]-box[i][0], box[(i+1)%4][1]-box[i][1]) for i in range(4)]
+            for i, edge in enumerate(edges):
+                other = edges[(i+1)%4]
+                divisor = math.hypot(*edge)*math.hypot(*other)
+                if divisor < 1e-10 or abs(sum(a*b for a, b in zip(edge, other))/divisor) > 1e-5:
+                    raise ValueError(f"Non-rectangular candidate for {record['name']}")
+            selected.append(record)
+    old_width, old_height = result['image_width'], result['image_height']
+    xs = [x for r in selected for x, _ in r['box']]
+    ys = [y for r in selected for _, y in r['box']]
+    left = max(0, math.ceil(-min(xs, default=0)))
+    top = max(0, math.ceil(-min(ys, default=0)))
+    right = max(0, math.ceil(max(xs, default=old_width)-old_width))
+    bottom = max(0, math.ceil(max(ys, default=old_height)-old_height))
+    width, height = old_width+left+right, old_height+top+bottom
+    result.update(source_image_width=old_width, source_image_height=old_height,
+                  image_width=width, image_height=height,
+                  padding={'left': left, 'top': top, 'right': right, 'bottom': bottom},
+                  padding_colour=[114, 114, 114], label_lines=[])
+    # Shift every report coordinate, including unresolved candidates and centres,
+    # so the viewer and CSV/JSON consumers agree with the exported image.
+    for record in result['links']:
+        for key in ('box', 'candidate_box'):
+            if record.get(key) is not None:
+                record[key] = [(x+left, y+top) for x, y in record[key]]
+        if record.get('center_px') is not None:
+            x, y = record['center_px']
+            record['center_px'] = (x+left, y+top)
+        record['label_index'] = None
+        if record in selected:
+            record['label_index'] = len(result['label_lines'])
+            result['label_lines'].append(label_line(record['box'], width, height))
+        if approve_all:
+            record['review_reasons_before_approval'] = record.get('reasons', [])
+            record['reasons'] = []
+    if approve_all:
+        result['review_reasons_before_approval'] = result.get('reasons', [])
+        result['reasons'] = []
+        result['status'] = 'ready'
+        result['approval'] = 'user_approved_all_displayed_boxes'
+    else:
+        prefixes = tuple(record['name']+': ' for record in result['links'])
+        result['reasons'] = [reason for reason in result.get('reasons', [])
+                             if not reason.startswith(prefixes)]
+        result['reasons'].extend(record['name']+': '+', '.join(record['reasons'])
+                                 for record in result['links'] if record.get('reasons'))
+        result['status'] = 'needs_review' if result['reasons'] else 'ready'
+    return result
+
+
+def save_padded_image(source, destination, report):
+    """Save a lossless 8-bit PNG copy with a neutral border; preserve source pixels.
+
+    Pillow is used only when padding is required. It is available in the current
+    Blender Python installation. Fail rather than silently reduce 16-bit images.
+    """
+    source, destination = Path(source), Path(destination)
+    if source.resolve() == destination.resolve():
+        raise ValueError('Padding must write a new image, not overwrite its source')
+    padding = report.get('padding', dict(left=0, top=0, right=0, bottom=0))
+    if not any(padding.values()):
+        shutil.copy2(source, destination)
+        return
+    with source.open('rb') as stream:
+        header = stream.read(29)
+    if header[:8] != b'\x89PNG\r\n\x1a\n' or len(header) < 29 or header[24] != 8:
+        raise ValueError('Boundary padding requires an 8-bit PNG source; original left unchanged')
+    from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
+    with Image.open(source) as image:
+        if image.size != (report['source_image_width'], report['source_image_height']):
+            raise ValueError('Source image dimensions do not match the annotation report')
+        if image.mode not in ('RGB', 'RGBA'):
+            raise ValueError(f'Unsupported PNG mode for boundary padding: {image.mode}')
+        colour = tuple(report.get('padding_colour', [114, 114, 114]))
+        if image.mode == 'RGBA':
+            colour += (255,)
+        canvas = Image.new(image.mode, (report['image_width'], report['image_height']), colour)
+        canvas.paste(image, (padding['left'], padding['top']))
+        info = PngInfo()
+        for key, value in image.info.items():
+            if isinstance(value, str):
+                info.add_text(key, value)
+        canvas.save(destination, pnginfo=info, icc_profile=image.info.get('icc_profile'))
 
 
 # -----------------------------------------------------------------------------
@@ -233,10 +350,11 @@ def annotate(scene, camera, links, dg, width, height, settings):
         records.append(record)
     if not lines:
         reasons.append('no_labels_check_image')
-    return {'schema_version': 1, 'class_names': {0: 'link'},
+    report = {'schema_version': 1, 'class_names': {0: 'link'},
             'coordinate_origin': 'top_left', 'image_width': width, 'image_height': height,
             'status': 'needs_review' if reasons else 'ready', 'reasons': reasons,
             'visibility_method': 'sampled_surface_rays', 'links': records, 'label_lines': lines}
+    return include_review_boxes(report) if settings.get('export_boundary_boxes', False) else report
 
 
 def write_annotation(folder, filename, report, rendered):
@@ -254,7 +372,15 @@ def write_annotation(folder, filename, report, rendered):
         source = folder/'_pending'/filename
         destination = images/filename
         (labels/f'{stem}.txt').write_text(''.join(line+'\n' for line in report['label_lines']), encoding='utf-8')
-        source.replace(destination)
+        if any(report.get('padding', {}).values()):
+            save_padded_image(source, destination, report)
+            # Keep the original render for traceability when its canvas changed.
+            originals = folder/'originals'
+            originals.mkdir(exist_ok=True)
+            source.replace(originals/filename)
+            report['original_image_path'] = (originals/filename).relative_to(folder).as_posix()
+        else:
+            source.replace(destination)
         report['image_path'] = destination.relative_to(folder).as_posix()
         report['label_path'] = (labels/f'{stem}.txt').relative_to(folder).as_posix()
         if report['status'] == 'ready':
