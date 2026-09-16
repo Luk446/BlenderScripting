@@ -1,0 +1,18 @@
+{
+  "dataset": "/run/user/1000/gvfs/smb-share:server=frontier-nas-1,share=home/BlenderSimDatasetNAS/chains_001",
+  "decisions": {
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00000.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00001.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00002.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00003.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00004.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00005.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00006.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00007.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00008.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00009.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00010.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00011.png": "keep",
+    "batch_00000000/run_20260914_101637_029323/review/images/train/chain_00012.png": "keep"
+  }
+}

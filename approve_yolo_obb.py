@@ -9,6 +9,7 @@ edges are retained using neutral canvas padding; every label is shifted with it.
 """
 import argparse
 import csv
+import copy
 import json
 from pathlib import Path
 import shutil
@@ -16,7 +17,7 @@ import shutil
 from yolo_obb import include_review_boxes, save_padded_image
 
 
-def approve_batch(source, output, excluded=()):
+def approve_batch(source, output, excluded=(), approval_modes=None):
     source, output = Path(source).resolve(), Path(output).resolve()
     if output.exists():
         raise FileExistsError(f'Destination already exists: {output}')
@@ -41,7 +42,17 @@ def approve_batch(source, output, excluded=()):
         image = (source/report['image_path']).resolve()
         if source not in image.parents or not image.is_file():
             raise ValueError(f'Invalid or missing source image: {image}')
-        approved = include_review_boxes(report, approve_all=True)
+        mode = approval_modes[filename] if approval_modes is not None else 'individual_review'
+        if mode not in ('individual_review', 'batch_audit', 'default_accept'):
+            raise ValueError(f'Invalid approval mode: {mode}')
+        approved = include_review_boxes(report, approve_all=True) if mode == 'individual_review' else copy.deepcopy(report)
+        if mode in ('batch_audit', 'default_accept'):
+            if any(r.get('candidate_box') and r.get('label_index') is None and not r.get('excluded') for r in report['links']):
+                raise ValueError(f'{filename}: unresolved candidates require individual review')
+            approved['review_reasons_before_approval'] = report.get('reasons', [])
+            approved['status'] = 'ready'
+            approved['approval'] = mode + '_not_individually_reviewed'
+        approved['approval_mode'] = mode
         if not approved['label_lines']:
             raise ValueError(f'{filename}: no boxes to approve; exclude this image explicitly')
         approved.update(filename=filename, source_batch=str(source), source_image_path=report['image_path'],
@@ -57,7 +68,10 @@ def approve_batch(source, output, excluded=()):
     rows = []
     for image, report in planned:
         filename = report['filename']
-        save_padded_image(image, images/filename, report)
+        if report['approval_mode'] in ('batch_audit', 'default_accept'):
+            shutil.copy2(image, images/filename)
+        else:
+            save_padded_image(image, images/filename, report)
         (output/report['label_path']).write_text(''.join(line+'\n' for line in report['label_lines']), encoding='utf-8')
         (annotations/f'{Path(filename).stem}.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         rows.append(dict(filename=filename, group_id=report['group_id'], image_path=report['image_path'],
@@ -70,7 +84,8 @@ def approve_batch(source, output, excluded=()):
     (output/'train_ready.txt').write_text(''.join('./'+r['image_path']+'\n' for r in rows), encoding='utf-8')
     (output/'approval.json').write_text(json.dumps(dict(source_batch=str(source), excluded=sorted(excluded),
         approved_images=len(rows), approved_links=sum(r['labels'] for r in rows),
-        policy='User-approved displayed boxes; neutral padding preserves rectangles'), indent=2), encoding='utf-8')
+        policy='Recorded individual review, batch audit or default acceptance; image/label pairs preserved',
+        approval_modes={r['filename']: r['approval_mode'] for _, r in planned}), indent=2), encoding='utf-8')
     for name in ('settings.json', 'metadata.csv'):
         if (source/name).exists():
             shutil.copy2(source/name, output/('source_'+name))

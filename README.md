@@ -108,10 +108,94 @@ For example, after fetching a job:
 python3 view_yolo_obb.py outputs/chains_001/batch_00000000/run_...
 ```
 
+For a resumable, one-image-at-a-time review across every batch in a job, run:
+
+```bash
+python3 review_yolo_obb.py /mnt/frontier-home/BlenderSimDatasetNAS/chains_001
+```
+
+The window accepts `K`, Enter, or Space to keep; `R` to reject; `B` to go back;
+`S` to skip; and `Q` or Escape to save and quit. Decisions are saved after every
+keep/reject action in `chains_001_review.json` in the current directory. Running
+the same command again resumes at the first undecided image. The raw dataset is
+not modified, and rejected filenames are summarized by batch on exit.
+
 Use the approval workflow below after inspecting the overlays. Retain each run
 folder's identity: filenames restart at `chain_00000.png` in each batch, so
 flattening batches into one folder would overwrite images. Padded image/label
 pairs must remain together. Outputs and logs are ignored by Git.
+
+### Faster dataset verification: default acceptance with critical review
+
+The default approval policy accepts ordinary unreviewed images at export and
+excludes every explicit reject. Only **very-high-risk** images require a keep or
+reject decision. This user-selected policy also applies to sampled images; a
+rejected sample does not force full review in this mode. Nothing is exported
+merely by closing the reviewer.
+
+```bash
+python3 qa_yolo_obb.py /mnt/frontier-home/BlenderSimDatasetNAS/chains_002 \
+  --output chains_002_qa.json --sample-size 100 --seed 42
+python3 review_yolo_obb.py /mnt/frontier-home/BlenderSimDatasetNAS/chains_002 \
+  --qa chains_002_qa.json --decisions chains_002_review.json --grid
+python3 approve_audited_job.py --qa chains_002_qa.json \
+  --decisions chains_002_review.json \
+  --output /mnt/frontier-home/Approved_BlenderSimDatasetNAS/chains_002
+```
+
+For the current run, use the existing launcher and report/decision paths in
+`/home/Luke/marine_YOLO_pipeline/outputs/chains_002_workflow/REVIEW_NEXT.md`.
+Close and reopen an already running reviewer after updating the policy.
+
+Very-high-risk conditions are defined in `acceptance_policy.py`:
+
+- Integrity failures (must be rejected or repaired; Keep cannot override them).
+- No exported labels, or unresolved candidate boxes.
+- Mean brightness below 10 or contrast standard deviation below 5 on 8-bit
+  grayscale source pixels, excluding neutral padding.
+- Padding occupying more than 50% of the exported image area.
+- A compositor alignment warning.
+
+These are provisional screening thresholds, not proof of recognisability. The
+blanket render/viewport mismatch flag, fog, particles, cropping, moderate quality
+warnings and exact duplicates remain recorded/ranked but do not alone require a
+decision. Very-high-risk images left skipped or undecided block export. A kept
+zero-label image still cannot export unless candidate boxes provide valid labels;
+reject images with no valid boxes.
+
+The default grid contains only mandatory cases. Use `--all` to inspect or reject
+any other image; undecided ordinary tiles display `default accept`. N/P changes
+pages; click for detail; K/Enter/Space keeps, R rejects, S/Escape returns to the
+grid, Q exits the grid. Decisions save after each action and are not overwritten
+with artificial Keep decisions. Even an empty required queue saves a decision
+file bound to the QA fingerprint.
+
+The scanner still checks every image/label/report pair, pixel OBB geometry,
+padding dimensions/borders, file inventory and completed-run manifests. SHA-256
+fingerprints prevent stale-data approval. Its original `selection` field and
+sampling remain available for optional strict review; the separate `acceptance`
+and `critical_reasons` fields determine the new default queue. Rescan after a
+policy update. Existing fingerprint-bound decisions remain usable when dataset
+bytes and absolute path are unchanged.
+
+Export preserves source files and batch/run identities and refuses an existing
+destination. Default-accepted images copy the exported image/label pairs without
+adding candidate boxes; individual Keep retains the existing candidate approval
+behaviour. Manifests and annotation reports distinguish `default_accept` from
+`individual_review` and `excluded`. The acceptance policy and thresholds are
+recorded with the exported QA. Synthetic exports remain training-only.
+
+To restore the earlier stricter workflow, pass `--strict-review` to both reviewer
+and exporter. That mode requires the old high-risk queue and audit samples; a
+rejected sample requires expanded review or repair. Add `--accept-batch-audit`
+to a strict export to accept eligible unsampled images. That flag is unnecessary
+in the default mode.
+
+Regression checks:
+
+```bash
+python3 -m unittest test_default_acceptance test_qa_yolo_obb test_review_yolo_obb test_yolo_obb test_render_batches -v
+```
 
 ### Installation and checks
 
@@ -188,6 +272,49 @@ blend. Avoid editing the scene while it runs. Blender may be busy during renders
 The generator also produces **YOLO OBB labels**, with class `0: link`.
 
 ## Network storage
+
+### Ubuntu VM: native LAN mount
+
+Use `/mnt/frontier-home/BlenderSimDatasetNAS/chains_001` for the current dataset
+and `/mnt/frontier-home/Approved_BlenderSimDatasetNAS/chains_001` for its approved
+export. The working setup is VirtualBox bridged networking through the Ethernet
+adapter owned by Windows, plus a native CIFS mount of `//192.168.67.251/home` at
+`/mnt/frontier-home` with SMB 3.0. The user measured approximately 100 MB/s on
+2026-09-14, compared with 2–4 MB/s in earlier VM tests; these were informal copy
+measurements and do not isolate the contribution of each change.
+
+The old desktop `smb://frontier-nas-1/home` shortcut resolved through Tailscale
+and used GVFS. Its Tailscale connection was direct over the LAN, not an internet
+relay. After a VM restart, the temporary native mount disappeared; recreating
+it restored the faster path. Use `/mnt/frontier-home` rather than the old sidebar
+shortcut or `/run/user/1000/gvfs/...` path.
+
+To make the mount persistent, run in your Ubuntu terminal:
+
+```bash
+cd /home/Luke/marine_YOLO_pipeline
+sudo python3 scripts/setup_nas_mount.py
+```
+
+This prompts locally for credentials, tests a separate read-only mount, backs up
+`/etc/fstab`, and configures mounting on demand after reboot without disconnecting
+the current mount. Persistent mounting was installed and verified after reboot
+on 2026-09-14: both systemd units were active and the dataset was accessible
+through the direct LAN CIFS mount. The sibling
+pipeline's `docs/NAS_ACCESS.md` contains the complete configuration and recovery
+steps. After reboot, check:
+
+```bash
+ls /mnt/frontier-home/BlenderSimDatasetNAS/chains_001/complete.json
+findmnt -T /mnt/frontier-home
+```
+
+Expect `//192.168.67.251/home` with filesystem `cifs`; `ext4` means the NAS is not
+mounted there. Keep the NAS LAN address stable. Regenerate QA using the stable
+mount path; if decisions were recorded under the GVFS path, preserve them and use
+a new decisions file rather than changing their dataset identity fields.
+
+### Windows desktop paths
 
 For the current NAS workflow, set the generator output to a UNC path before
 rendering:
