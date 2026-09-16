@@ -1,6 +1,15 @@
 # Mooring chain dataset
 
+For the 200-frame camera-path animation and headless SSH GPU commands, see
+[Animation rendering](ANIMATION_RENDER.md).
+
 ## Remote GPU rendering from this VM
+
+New headless render jobs now use the NAS. First complete the no-sudo user mount
+setup in [Animation and NAS rendering](ANIMATION_RENDER.md). On iris the share
+is `/home/luke_admin/nas/frontier-home`; on the VM it is `/mnt/frontier-home`.
+Dataset outputs use `BlenderSimDatasetNAS/render_jobs/JOB`; logs use
+`BlenderSimDatasetNAS/render_logs/JOB.log`. Local output paths are rejected.
 
 The VM checkout is `/home/Luke/BlenderScripting`. The GPU machine is
 `luke_admin@iris`, with the remote project at `/home/luke_admin/BlenderScripting`.
@@ -23,7 +32,7 @@ bash remote_render.sh sync
 bash remote_render.sh start chains_001 1000 --batch-size 100 --seed 10000
 bash remote_render.sh status chains_001
 
-# Download the job into this checkout's outputs/chains_001 directory.
+# Report the shared NAS job path; no local download is made.
 bash remote_render.sh fetch chains_001
 ```
 
@@ -61,8 +70,9 @@ the VM and has overlays inside each completed run's `overlays/` directory.
 
 ### Progress, interruption and resume
 
-The main log is `logs/JOB.log` on iris. Detailed Blender logs, including errors,
-are inside `outputs/JOB/batch_*/render_*.log`. `progress.json` records completed
+The main log is `BlenderSimDatasetNAS/render_logs/JOB.log` on the NAS.
+Detailed Blender logs are inside `render_jobs/JOB/batch_*/render_*.log`.
+`progress.json` records completed
 images; the job's top-level `complete.json` appears only after all batches finish.
 To inspect a running terminal:
 
@@ -94,10 +104,10 @@ this is a reserve check, not a prediction of the next batch's disk usage.
 
 ### Outputs and review
 
-Render to iris's local disk, then fetch results to the VM or copy them to the
-NAS. The command-line entry point overrides the generator's Windows/NAS output
-path without editing its desktop defaults. Native Linux mounts are required to
-write to a NAS directly; Windows UNC paths are not Linux mount paths.
+Render into the user-mounted NAS on iris. `fetch` reports the corresponding
+shared VM path without downloading a local copy. The user mount temporarily
+caches writes and uploads closed files. Keep it running until transfers finish;
+see the NAS runbook for verification. Historical local jobs are retained.
 
 Every successful batch contains the existing `run_...` layout with image/label
 pairs, metadata, settings, annotation reports and an additional
@@ -105,7 +115,7 @@ pairs, metadata, settings, annotation reports and an additional
 For example, after fetching a job:
 
 ```bash
-python3 view_yolo_obb.py outputs/chains_001/batch_00000000/run_...
+python3 view_yolo_obb.py /mnt/frontier-home/BlenderSimDatasetNAS/render_jobs/JOB/batch_00000000/run_...
 ```
 
 For a resumable, one-image-at-a-time review across every batch in a job, run:

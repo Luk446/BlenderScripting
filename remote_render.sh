@@ -5,6 +5,8 @@ local_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 host="${RENDER_HOST:-luke_admin@iris}"
 remote_root="${RENDER_ROOT:-/home/luke_admin/BlenderScripting}"
 blender="${RENDER_BLENDER:-/home/luke_admin/apps/blender-5.2.1-linux-x64/blender}"
+output_root=/home/luke_admin/nas/frontier-home/BlenderSimDatasetNAS/render_jobs
+log_root=/home/luke_admin/nas/frontier-home/BlenderSimDatasetNAS/render_logs
 ssh_command=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$host")
 
 remote() {
@@ -53,38 +55,41 @@ case "$action" in
             exit 2
         fi
         if [[ "$action" == fetch ]]; then
-            mkdir -p "$local_root/outputs/$job"
-            rsync -a --partial -e 'ssh -o BatchMode=yes' \
-                "$host:$remote_root/outputs/$job/" "$local_root/outputs/$job/"
+            local_job="/mnt/frontier-home/BlenderSimDatasetNAS/render_jobs/$job"
+            python3 "$local_root/nas_storage.py" "$local_job"
+            test -d "$local_job"
+            echo "Output is already on the NAS: $local_job"
         elif [[ "$action" == status ]]; then
             if remote tmux has-session -t "=blend-$job" 2>/dev/null; then
                 echo 'Session: running'
             else
                 echo 'Session: stopped (check completion marker and log below)'
             fi
-            remote cat "$remote_root/outputs/$job/progress.json" || true
-            if remote test -f "$remote_root/outputs/$job/complete.json"; then echo 'Job: complete'; fi
-            remote tail -n 15 "$remote_root/logs/$job.log"
+            remote cat "$output_root/$job/progress.json" || true
+            if remote test -f "$output_root/$job/complete.json"; then echo 'Job: complete'; fi
+            remote tail -n 15 "$log_root/$job.log"
         else
             count="${1:?Supply the total image count}"
             shift
             if [[ ! "$count" =~ ^[1-9][0-9]*$ ]]; then echo 'Image count must be positive.' >&2; exit 2; fi
+            remote python3 "$remote_root/nas_storage.py" "$output_root/$job"
+            remote python3 "$remote_root/nas_storage.py" "$log_root"
             # Fail synchronously before opening tmux for accidental output reuse.
             if [[ "$action" == start ]]; then
-                if remote test -e "$remote_root/outputs/$job"; then
+                if remote test -e "$output_root/$job"; then
                     echo 'Job exists. Use resume with the original settings, or choose a new name.' >&2
                     exit 2
                 fi
             else
-                remote test -f "$remote_root/outputs/$job/job.json"
+                remote test -f "$output_root/$job/job.json"
             fi
-            remote mkdir -p "$remote_root/logs"
+            remote mkdir -p "$log_root"
             resume_args=()
             if [[ "$action" == resume ]]; then resume_args=(--resume); fi
             printf -v command '%q ' python3 -u "$remote_root/render_batches.py" \
                 --blender "$blender" --blend "$remote_root/ChainLinkScene.blend" \
-                --output "$remote_root/outputs/$job" --images "$count" "${resume_args[@]}" "$@"
-            printf -v log_path '%q' "$remote_root/logs/$job.log"
+                --output "$output_root/$job" --images "$count" "${resume_args[@]}" "$@"
+            printf -v log_path '%q' "$log_root/$job.log"
             remote tmux new-session -d -s "blend-$job" "$command >> $log_path 2>&1"
             echo "Started blend-$job on $host. Use: bash remote_render.sh status $job"
         fi

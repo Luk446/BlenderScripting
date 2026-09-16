@@ -33,6 +33,12 @@ def main():
         parser.error('--output is required for generation')
     if args.result and args.result.exists():
         parser.error('--result already exists; choose a new path')
+    if not args.check_only:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from nas_storage import require_nas
+        require_nas(args.output)
+        if args.result:
+            require_nas(args.result)
 
     import bpy
     from PIL import Image  # Required for padded OBB image/label pairs.

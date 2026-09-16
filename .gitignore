@@ -10,6 +10,7 @@ validation
 *.pdf
 
 !README.md
+!ANIMATION_RENDER.md
 
 # large blend files
 *.blend*

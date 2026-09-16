@@ -12,9 +12,10 @@ import sys
 import time
 
 from render_headless import positive
+from nas_storage import require_nas
 
 SOURCE = Path(__file__).resolve().parent
-SCRIPTS = ('generate_dataset.py', 'yolo_obb.py', 'render_headless.py')
+SCRIPTS = ('generate_dataset.py', 'yolo_obb.py', 'render_headless.py', 'nas_storage.py')
 
 
 def digest(path):
@@ -70,7 +71,7 @@ def main():
         parser.error('use a nonnegative device, seed in [0, 2**31), and at most 2**31 images')
     args.blender = args.blender.resolve(strict=True)
     args.blend = args.blend.resolve(strict=True)
-    output = args.output.resolve()
+    output = require_nas(args.output)
     existed = output.exists()
     if existed and not args.resume:
         parser.error('output exists; choose a new job directory or use --resume')

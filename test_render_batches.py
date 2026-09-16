@@ -48,7 +48,11 @@ class BatchResumeTests(unittest.TestCase):
             scene = root / 'scene.blend'
             scene.write_bytes(b'test scene')
             job = root / 'job'
-            command = [sys.executable, str(SOURCE/'render_batches.py'), '--blender', str(fake),
+            runner = (f'import sys; sys.path.insert(0, {str(SOURCE)!r}); '
+                      'import render_batches; '
+                      'render_batches.require_nas = lambda path: path.resolve(); '
+                      'render_batches.main()')
+            command = [sys.executable, '-c', runner, '--blender', str(fake),
                        '--blend', str(scene), '--output', str(job), '--images', '5',
                        '--batch-size', '2', '--seed', '42', '--min-free-gb', '1']
             def run(extra=()):
